@@ -1,119 +1,152 @@
 import requests
 import pandas as pd
 import os
-from scripts.config import FRED_API_KEY, TREASURY_API_URL
+from scripts.config import FRED_API_KEY
+import yfinance as yf
 
-# Fetch data from FRED (Economic series) and aggregate to monthly frequency
+# List of macroeconomic indicators (FRED series)
+MACRO_FACTORS = {
+    "DGS2": "2Y_Treasury_Yield",
+    "DGS5": "5Y_Treasury_Yield",
+    "DGS10": "10Y_Treasury_Yield",
+    "DGS30": "30Y_Treasury_Yield",
+    "FEDFUNDS": "Fed_Funds_Rate",
+    "RPONTSYD": "Overnight_Repo_Rate",
+    "CPIAUCSL": "CPI",
+    "CPILFESL": "Core_CPI",
+    "PCEPI": "PCE_Inflation",
+    "T5YIFR": "5Y_Inflation_Expectation",
+    "M2SL": "M2_Money_Supply",
+    "TEDRATE": "TED_Spread",
+    "BAMLH0A0HYM2": "High_Yield_Spread",
+    "A191RL1Q225SBEA": "GDP_Growth",
+    "UNRATE": "Unemployment_Rate",
+    "INDPRO": "Industrial_Production",
+    "RSAFS": "Retail_Sales",
+    "DEXUSEU": "USD_EUR_Exchange_Rate"# ,
+    # "EMGUS": "EM_Bond_Spread"
+}
+
+# Fetch FRED series dynamically
 def fetch_fred_series(series_id):
     url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
     response = requests.get(url)
-    data = response.json()
-    df = pd.DataFrame(data['observations'])
-    df['value'] = pd.to_numeric(df['value'], errors='coerce')
     
-    # Convert 'date' to datetime and then to monthly frequency
-    df['date'] = pd.to_datetime(df['date'])
-    df['date'] = df['date'].dt.to_period('M').dt.to_timestamp()  # Convert to month start
+    try:
+        data = response.json()
+    except Exception as e:
+        print(f"Error decoding JSON for {series_id}: {e}")
+        print(f"Response content: {response.text}")
+        return pd.DataFrame()  # Return empty DataFrame on error
+
+    if "observations" not in data:
+        print(f"⚠️ Warning: No 'observations' found for {series_id}. Response: {data}")
+        return pd.DataFrame()  # Return empty DataFrame if no data
+
+    df = pd.DataFrame(data["observations"])
+    df = df.drop(columns=["realtime_start", "realtime_end"], errors="ignore")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"]).dt.to_period("M").dt.to_timestamp()
+    df = df.groupby("date").last().reset_index()
     
-    # Group by 'date' to ensure monthly aggregation (take most recent value for each month)
-    df = df.groupby('date').last().reset_index()
+    return df.rename(columns={"value": series_id})
 
-    # Rename columns to match series name
-    df = df[['date', 'value']].rename(columns={'value': series_id})
-
-    print(f"Fetched {series_id} data", df.head())
-    return df
-
-# Fetch US Treasury yield curve data from FRED and aggregate to monthly frequency
-def fetch_treasury_yield():
-    treasury_series = [
-        "DGS10",  # 10Y Treasury Yield
-        "DGS2",   # 2Y Treasury Yield
-        "DGS3MO", # 3-Month Treasury Yield
-    ]
-    
-    all_treasury_data = []
-    for series in treasury_series:
-        df = fetch_fred_series(series)
-        all_treasury_data.append(df)
-    
-    # Merge Treasury data into one DataFrame
-    treasury_df = all_treasury_data[0]
-    for df in all_treasury_data[1:]:
-        treasury_df = treasury_df.merge(df, on='date', how='outer')
-
-    treasury_df = treasury_df.rename(columns={"DGS10": "10Y_Treasury_Yield", "DGS2": "2Y_Treasury_Yield", "DGS3MO": "3M_Treasury_Yield"})
-    print("Fetched Treasury Yield Data", treasury_df.head())
-    return treasury_df
-
-# Fetch Corporate bond yield data from FRED and aggregate to monthly frequency
-def fetch_corporate_bond_yields():
-    corporate_bond_series = [
-        "BAA10Y",  # Corporate bond yield (BAA 10-Year)
-        "AAA10Y",  # Corporate bond yield (AAA 10-Year)
-    ]
-    
-    all_corp_bond_data = []
-    for series in corporate_bond_series:
-        df = fetch_fred_series(series)
-        all_corp_bond_data.append(df)
-    
-    # Merge Corporate Bond data into one DataFrame
-    corporate_bonds_df = all_corp_bond_data[0]
-    for df in all_corp_bond_data[1:]:
-        corporate_bonds_df = corporate_bonds_df.merge(df, on='date', how='outer')
-
-    corporate_bonds_df = corporate_bonds_df.rename(columns={"BAA10Y": "BAA_Corp_Bond_Yield", "AAA10Y": "AAA_Corp_Bond_Yield"})
-    print("Fetched Corporate Bond Yield Data", corporate_bonds_df.head())
-    return corporate_bonds_df
-
-# Fetch other macroeconomic data from FRED and aggregate to monthly frequency
+# Fetch macroeconomic data
 def fetch_macro_data():
-    fred_series = {
-        'CPIAUCSL': 'CPI',  # Inflation
-        'DGS10': '10Y_Treasury_Yield',  # 10Y bond yield
-        'DGS2': '2Y_Treasury_Yield',  # 2Y bond yield
-        'DEXUSEU': 'USD_EUR_Exchange_Rate',  # FX Rate
-        'M2SL': 'M2_Money_Supply',  # M2 Money Supply
-        'UNRATE': 'Unemployment_Rate'  # Unemployment rate
-    }
-
     all_data = []
-    for series_id, name in fred_series.items():
+    
+    for series_id, column_name in MACRO_FACTORS.items():
         df = fetch_fred_series(series_id)
-        df = df.rename(columns={series_id: name})
-        all_data.append(df)
-
-    # Merge all macroeconomic data into one DataFrame
+        
+        if df.empty:
+            print(f"⚠️ Skipping {series_id} ({column_name}) due to missing data.")
+        else:
+            df = df.rename(columns={series_id: column_name})
+            all_data.append(df)
+    
+    if not all_data:
+        raise ValueError("❌ No macroeconomic data was retrieved. Check your FRED series IDs.")
+    
     macro_df = all_data[0]
     for df in all_data[1:]:
         macro_df = macro_df.merge(df, on='date', how='outer')
     
-    print("Fetched Macro Data", macro_df.head())
     return macro_df
 
-# Fetch all data (macroeconomic + bond yields) and save as CSV
+# Fetch bond data from Yahoo Finance
+def fetch_yahoo_bond_data(tickers):
+    bond_data = {}
+    
+    for ticker in tickers:
+        print(f"Fetching data for {ticker}...")
+        bond = yf.Ticker(ticker)
+        bond_hist = bond.history(period="max")  # You can change the period here
+
+        # Ensure the data has a 'Close' column, which is typically the adjusted closing price
+        if 'Close' in bond_hist.columns:
+            bond_hist = bond_hist[['Close']].rename(columns={'Close': ticker})
+            
+            # Resample to monthly frequency to avoid duplicate daily dates
+            bond_hist.index = pd.to_datetime(bond_hist.index)  # Ensure DateTime format
+            bond_hist = bond_hist.resample('M').last()  # Keep last value of each month
+            
+            bond_data[ticker] = bond_hist[ticker]
+        else:
+            print(f"⚠️ Warning: No 'Close' data found for {ticker}.")
+    
+    # Convert the dictionary to a DataFrame
+    df_bond_data = pd.DataFrame(bond_data)
+
+    # Reset the index to make 'Date' a column and ensure it is in datetime format
+    df_bond_data.reset_index(inplace=True)
+    df_bond_data.rename(columns={'index': 'Date'}, inplace=True)
+    df_bond_data['Date'] = df_bond_data['Date'].dt.to_period('M').dt.to_timestamp()
+
+    return df_bond_data
+
+
+# List of bond ETFs (you can add more bond tickers here)
+BOND_TICKERS = ['^TNX', 'BND', 'TLT', 'BIL', 'SHY', 'IEF', 'LQD']
+
+# Fetch bond data (Yahoo Finance)
+def fetch_bond_data():
+    bond_df = fetch_yahoo_bond_data(BOND_TICKERS)
+    return bond_df
+
+
+# Compute credit spreads for corporate bonds
+def compute_credit_spreads(df):
+    required_columns = ["BAA_Corp_Bond_Yield", "AAA_Corp_Bond_Yield", "10Y_Treasury_Yield"]
+    
+    # Check if all required columns are present
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        print(f"⚠️ Missing columns: {missing_cols}. Skipping credit spread calculations.")
+        return df  # Return the original DataFrame without adding spreads
+
+    df["BAA_Spread"] = df["BAA_Corp_Bond_Yield"] - df["10Y_Treasury_Yield"]
+    df["AAA_Spread"] = df["AAA_Corp_Bond_Yield"] - df["10Y_Treasury_Yield"]
+
+    return df
+
+# Fetch all data and return two separate DataFrames
 def fetch_all_data():
-    print("Fetching Treasury and macroeconomic data...")
-    
-    # Fetching macroeconomic data
+    # Fetch macro and bond data
     macro_data = fetch_macro_data()
-    
-    # Fetching Treasury yield data
-    treasury_data = fetch_treasury_yield()
-    
-    # Fetching Corporate bond yield data
-    corporate_bond_data = fetch_corporate_bond_yields()
+    bond_data = fetch_bond_data()
 
-    # Merging all datasets into one final DataFrame
-    final_df = macro_data
-    final_df = final_df.merge(treasury_data, on='date', how='outer')
-    final_df = final_df.merge(corporate_bond_data, on='date', how='outer')
+    # Print the first few rows of both DataFrames to inspect them
+    print("Macro Data:")
+    print(macro_data.head())
+    print("\nBond Data:")
+    print(bond_data.head())
+    bond_data.to_csv("data/bond_data.csv", index=False)
 
-    # Save the final data to a CSV
-    final_df.to_csv("data/macro_and_bond_data.csv", index=False)
+    # Return the two DataFrames separately
+    return macro_data, bond_data
 
-    print("Data fetching complete. Final dataset saved to 'data/macro_and_bond_data.csv'.")
 
 if __name__ == "__main__":
-    fetch_all_data()
+    macro_df, bond_df = fetch_all_data()
+    # Now you have both macro_df and bond_df for further processing
+    
